@@ -25,7 +25,7 @@ Telegram Message Aggregator is a Python project that collects messages from mult
 
 ```
 git clone https://github.com/NikitaPanferov/posts_stealer.git
-cd telegram-message-aggregator
+cd posts_stealer
 ```
 
 3. Install the required packages:
