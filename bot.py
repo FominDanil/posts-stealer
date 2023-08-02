@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timedelta
+from typing import List, Optional
 from pyrogram.errors import InviteRequestSent, UserAlreadyParticipant, FloodWait
 
 import pyrogram
@@ -13,6 +14,8 @@ from config import TELEGRAM_LINKS, my_channel_link, YEAR, MONTH, DAY
 from pyrogram import Client, types, filters
 
 from dotenv import load_dotenv
+
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -27,35 +30,13 @@ chat_ids = []
 seen_messages = set()
 seen_urls = set()
 seen_captions = set()
+seen_photos = set()
 
 
-async def send_message(message):
-    if message.text:
-        await app.send_message(my_channel, message.text, entities=message.entities)
-    elif message.photo:
-        await app.send_photo(
-            my_channel,
-            message.photo.file_id,
-            caption=message.caption
-        )
-    elif message.video:
-        await app.send_video(
-            my_channel,
-            message.video.file_id,
-            caption=message.caption
-        )
-    elif message.audio:
-        await app.send_audio(
-            my_channel,
-            message.audio.file_id,
-            caption=message.caption
-        )
-    elif message.document:
-        await app.send_document(
-            my_channel,
-            message.document.file_id,
-            caption=message.caption
-        )
+class Albom(BaseModel):
+    messages: List[int]
+    date: Optional[datetime] = None
+    chat_id: Optional[str] = None
 
 
 @app.on_message(filters.chat(chat_ids))
@@ -72,12 +53,15 @@ async def handle_new_message(client, message):
         if message.caption in seen_captions:
             return
         seen_captions.add(message.caption)
-    await send_message(message)
+    if message.photo:
+        if message.photo.file_unique_id in seen_photos:
+            return
+        seen_photos.add(message.photo.file_unique_id)
+    await message.forward(my_channel)
 
 
 async def main():
     await app.start()
-    messages_to_forward = []
     date_month_ago = target_date - timedelta(days=30)
 
     global my_channel
@@ -109,6 +93,7 @@ async def main():
 
     bar = IncrementalBar('Обработка прошлых сообщений', max=len(TELEGRAM_LINKS), suffix='%(percent)d%% [%(eta)d сек]')
     bar.start()
+    albums = []
     for chat in TELEGRAM_LINKS:
         source_channel = await app.get_chat(chat if chat.split('/')[-1].startswith('+') else chat.split('/')[-1])
 
@@ -127,7 +112,15 @@ async def main():
             await app.join_chat(source_channel)
         except UserAlreadyParticipant:
             pass
+        except FloodWait as e:
+            print(f"Sleeping for {e.value} seconds")
+            await asyncio.sleep(e.value)
+            await app.join_chat(source_channel) 
         chat_ids.append(source_channel)
+        
+        
+        current_album = Albom(messages=[])
+        last_timestamp = None
 
         async for message in app.get_chat_history(source_channel):
             if message.date < target_date:
@@ -147,20 +140,37 @@ async def main():
                     continue
                 else:
                     seen_captions.add(message.caption)
+            if message.photo:
+                if message.photo.file_unique_id in seen_photos:
+                    continue
+                else:
+                    seen_photos.add(message.photo.file_unique_id)
 
-            messages_to_forward.append(message)
+            if not last_timestamp or abs((message.date - last_timestamp).total_seconds()) <= 1: # проверяем что сообщения отправлены с интервалом в 1 секунду
+                current_album.messages.append(message.id)
+            else:
+                if current_album:
+                    current_album.date = last_timestamp
+                    current_album.chat_id = source_channel
+                    albums.append(current_album)
+                    current_album = Albom(messages=[message.id])
+            last_timestamp = message.date
+        if current_album.messages:  # добавляем последний альбом
+            current_album.date = last_timestamp
+            current_album.chat_id = source_channel
+            albums.append(current_album)
         await asyncio.sleep(1)
         bar.next()
     bar.finish()
-    if messages_to_forward:
-        bar = IncrementalBar('Отправка сообщений', max=len(messages_to_forward))
+    if albums:
+        bar = IncrementalBar('Отправка сообщений', max=len(albums))
         bar.start()
-        for message in sorted(messages_to_forward, key=lambda mes: mes.date):
+        for message in sorted(albums, key=lambda mes: mes.date):
             try:
-                await send_message(message)
+                await app.forward_messages(my_channel, message.chat_id, message.messages)
             except FloodWait as e:
-                await asyncio.sleep(e.x)
-                await send_message(message)
+                await asyncio.sleep(e.value)
+                await app.forward_messages(my_channel, message.chat_id, message.messages)
             bar.next()
         bar.finish()
 
@@ -170,4 +180,6 @@ async def main():
 
     await pyrogram.idle()
     await app.stop()
-app.run(main())
+    
+if __name__ == '__main__':
+    app.run(main())
